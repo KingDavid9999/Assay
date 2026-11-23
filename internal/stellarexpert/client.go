@@ -423,28 +423,54 @@ func (c *Client) BlockedDomain(ctx context.Context, domain string, opts ...Looku
 // source recovered — the same "an outage rendered as an answer" failure the
 // error fields exist to prevent.
 //
+// GetOrFetch provides single-flight: concurrent lookups for the same key share
+// one upstream request. Waiters receive the same result and the same
+// FetchedAt. Errors are shared but not cached.
+//
 // A caller's freshness bound (WithMaxAge) is applied on top of the cache's own
-// TTL: a cached answer is reused only while it is younger than both.
+// TTL: a cached answer is reused only while it is younger than both. When the
+// cache cannot satisfy the bound, the lookup fetches directly, outside
+// single-flight, and stores the fresh answer. It must not join an in-flight
+// fetch: that fetch began before this request and its answer could be older
+// than the bound, which for max_age_secs=0 would hand back exactly the reuse
+// the caller refused.
 func lookup[T stamped](ctx context.Context, now func() time.Time, c *cache.Cache[T], key string, opts []LookupOption, fetch func() (T, error)) (T, bool, error) {
 	var lo lookupOptions
 	for _, opt := range opts {
 		opt(&lo)
 	}
-	if !lo.bypass {
-		if e, ok := c.Get(key); ok && withinMaxAge(ctx, now, e.FetchedAt) {
-			return e.Value, true, nil
+	bypass := lo.bypass
+	if !bypass {
+		if _, bounded := maxAgeFrom(ctx); bounded {
+			if e, ok := c.Get(key); ok && withinMaxAge(ctx, now, e.FetchedAt) {
+				return e.Value, true, nil
+			}
+			bypass = true
 		}
 	}
-	val, err := fetch()
+	if bypass {
+		val, err := fetch()
+		if err != nil {
+			var zero T
+			return zero, false, err
+		}
+		// Bypass still stores the fresh answer.
+		c.Put(key, cache.Entry[T]{Value: val, FetchedAt: val.fetchedAt()})
+		return val, false, nil
+	}
+
+	entry, fromCache, err := c.GetOrFetch(key, func() (cache.Entry[T], error) {
+		val, err := fetch()
+		if err != nil {
+			return cache.Entry[T]{}, err
+		}
+		return cache.Entry[T]{Value: val, FetchedAt: val.fetchedAt()}, nil
+	})
 	if err != nil {
 		var zero T
-		return zero, false, err
+		return zero, false, fmt.Errorf("lookup: %w", err)
 	}
-	// A bypassed fetch still stores its fresh answer: the caller asked for the
-	// source's current statement, and keeping a superseded copy would only
-	// serve it later. The cache no-ops when its TTL is non-positive.
-	c.Put(key, cache.Entry[T]{Value: val, FetchedAt: val.fetchedAt()})
-	return val, false, nil
+	return entry.Value, fromCache, nil
 }
 
 // withinMaxAge reports whether an answer fetched at fetchedAt may be reused

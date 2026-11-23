@@ -48,7 +48,7 @@ the message text.
 | `asset_not_found` | The asset does not exist on the ledger. |
 | `account_not_found` | The account does not exist on the ledger. |
 | `upstream_unavailable` | A required upstream call (Horizon, StellarExpert) failed. |
-| `rate_limited` | The client has exceeded the exposure rate limit; see `Retry-After`. |
+| `rate_limited` | The client has exceeded a rate limit (exposure always; scan when configured); see `Retry-After`. |
 
 ## Conventions
 
@@ -129,6 +129,10 @@ Status codes:
 - `400 Bad Request`: invalid asset code or issuer, missing `?asset=`, or an
   identifier naming the native asset — see above.
 - `404 Not Found`: asset not found on the ledger.
+- `429 Too Many Requests`: scan rate limit exceeded (only when configured via
+  `--scan-rate`; not applied by default). `Retry-After` gives the wait in
+  seconds. Public deployments should configure this to protect the shared
+  Horizon and StellarExpert upstreams.
 - `502 Bad Gateway`: the scan failed on an underlying network or upstream
   error; the message names the failing source.
 
@@ -203,25 +207,96 @@ curl -s 'http://localhost:8080/api/v1/scan?asset=USDZ-GAKTLPC4ZV37SSCITQ5IS5AQ4W
 To check every trustline an account holds at once, use the
 exposure endpoint (`GET /api/v1/exposure`, below).
 
-### `GET /api/v1/history?asset=CODE-ISSUER`
+### `GET /api/v1/history?asset=CODE-ISSUER&limit=100&before=...`
 
-Returns an asset's recorded observations in time order, oldest first, with
-the transitions derived between each consecutive pair. It reads only what
-scans have recorded; it never scans. The full semantics — retention, what an
-empty history means, and why an undetermined observation is returned marked
-rather than dropped — are in [history.md](history.md).
+Returns one bounded page of an asset's recorded observations in time order,
+oldest first, with the transitions derived between each consecutive pair. It
+reads only what scans have recorded; it never scans. The full semantics —
+pagination, both retention bounds, what an empty history means, and why an
+undetermined observation is returned marked rather than dropped — are in
+[history.md](history.md).
 
 Parameters:
 
 - `asset` (required): asset code and issuer.
+- `limit` (optional): page size, default **100**, maximum **256**.
+- `before` (optional): exclusive cursor; returns observations strictly older
+  than this RFC 3339 timestamp. Send the previous response's `next_before`
+  back as `before` to walk the history.
 
 Response:
 
 - `asset`, `state` (`valid`, `unknown`, or `missing` — the completeness of
   the history, not of the request), a plain-language `reason` whenever the
-  state is not `valid`, `count`, `observations[]`, `transitions[]`,
-  `latest_at` and `latest_age_secs` (so a consumer applies its own staleness
-  policy), and `retention` (the per-asset cap the results were read against).
+  state is not `valid`, `count` (observations on this page),
+  `observations[]`, `transitions[]` (including the transition into the page
+  from its predecessor, so a change at a page boundary is still reported),
+  `limit` (the page size applied), `next_before` (absent on the last page),
+  `latest_at` and `latest_age_secs` (the most recent observation overall, so a
+  consumer applies its own staleness policy), `retention` (the per-asset cap)
+  and `max_assets` (the global cap on assets the store retains).
+
+Status codes:
+
+- `200 OK`: a page of history returned — including an empty or empty-history
+  one. An asset with no observations is a successful result with
+  `state: "missing"`, never a 404: "we have never looked" and "the request
+  failed" are different answers. A page past the oldest retained observation
+  is an empty page with `state: "valid"`, not an error.
+- `400 Bad Request`: missing or invalid asset, the network's native asset, a
+  `limit` outside 1-256 (or not an integer), or a `before` that is not an
+  RFC 3339 timestamp.
+
+### `GET /api/v1/events?asset=CODE-ISSUER`
+
+Opens a Server-Sent Events (SSE) stream that pushes a message whenever a
+stored observation produces a capability, severity, or accountability
+transition. This allows consumers to react to changes in real time without
+polling.
+
+Parameters:
+
+- `asset` (required): asset code and issuer. The stream delivers events for
+  all assets; the parameter is validated for format but does not filter the
+  stream in this version.
+
+Stream format:
+
+- Standard SSE: each event is a `data:` line with a JSON object, followed by
+  a blank line.
+- Heartbeats: a `:` comment line every 15 seconds to keep the connection
+  alive through proxies and load balancers.
+- The initial comment `: connected` is sent immediately after the headers.
+
+Event payload:
+
+```json
+{
+  "asset": "USDC-GA5Z...",
+  "transition": { ... },
+  "timestamp": "2026-01-15T12:34:56Z"
+}
+```
+
+The `transition` object has the same structure as the transitions returned by
+`GET /api/v1/history` (see the `Transition` schema in the OpenAPI document).
+A transition's `state` is `valid`, `unknown`, or `missing`; only `valid`
+transitions are pushed (transitions involving undetermined observations are
+not emitted).
+
+Limits:
+
+- Maximum 100 concurrent SSE connections per server instance (configurable via
+  `Server.EventsLimiter`). Excess connections receive `429 Too Many Requests`
+  with `code: "rate_limited"`.
+
+Status codes:
+
+- `200 OK`: SSE stream established. The connection stays open until the
+  client closes it or the server shuts down.
+- `400 Bad Request`: missing or invalid asset parameter.
+- `429 Too Many Requests`: concurrent connection limit reached.
+- `503 Service Unavailable`: SSE not supported by the server infrastructure.
 
 Status codes:
 
@@ -262,8 +337,8 @@ Status codes:
 - `400 Bad Request`: missing or invalid `account`, `limit`, or `cursor`.
 - `404 Not Found`: account not found on the ledger.
 - `429 Too Many Requests`: rate limited. `Retry-After` gives the wait in
-  seconds. Exposure is rate-limited per client address because one request
-  runs a full scan per asset; `/api/v1/scan` is not affected.
+  seconds. Exposure is always rate-limited per client address because one
+  request runs a full scan per asset.
 - `502 Bad Gateway`: the account's trustline list could not be fetched.
 
 ### `GET /metrics`

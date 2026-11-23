@@ -16,7 +16,7 @@ usage:
                                   verify an offline bundle without a network
   assay diff [-json] A.json B.json
                                   compare two saved reports and print what changed
-  assay history [-guarantee] [-raw] CODE-ISSUER
+  assay history [-guarantee] [-raw] [-server URL] CODE-ISSUER
                                   print the asset's observation history
   assay registry-history [-rpc URL] [-contract C...] [-json] ASSET
                                   print the registry's attest/revoke events for an asset
@@ -24,7 +24,7 @@ usage:
   assay verify-preimage [-version VERSION] HASH PREIMAGE
                                   compare a stored hash with canonical preimage bytes
   assay checks                    print every check's ID and description
-  assay serve [-addr] [-history PATH]
+  assay serve [-addr] [-history PATH] [-observe FILE] [-observe-interval DURATION]
                                   serve the HTTP API and UI
   assay version                   print scanner identity, preimage encodings
                                   and build (VCS, Go) information
@@ -51,6 +51,15 @@ The attestation command additionally accepts:
                           reproduced from a fresh scan
   -bundle OUT             also write an offline verification bundle (raw
                           source bytes, report, preimage, digest) to OUT
+
+The history command additionally accepts:
+  -server URL             fetch history from a running assay server instead of
+                          computing from a local scan (e.g. http://localhost:8080)
+
+The serve command additionally accepts:
+  -observe FILE           path to asset list file for scheduled observation
+  -observe-interval DURATION
+                          interval between scheduled scans (default 6h)
 ```
 
 Commands that scan also accept:
@@ -337,6 +346,7 @@ see `docs/integrating.md` for what a consumer reads out of it, and
 ```
 ./assay serve -addr :8080
 ./assay serve -addr :8080 -history /var/lib/assay/history.jsonl
+./assay serve -addr :8080 -scan-rate 10 -scan-burst 20
 ```
 
 Each successful `GET /api/v1/scan` records an observation, and
@@ -345,6 +355,23 @@ derived transitions. `-history` points that store at an append-only JSON Lines
 log so it survives a restart; without it, history is in memory and lost when the
 process exits. The default retention is 256 observations per asset and the
 policy is in [history.md](history.md).
+
+**Rate limiting.** `GET /api/v1/exposure` is always rate-limited (default: 5
+requests burst, 1 per second per client address) because one request fans out
+to a full scan per asset. `GET /api/v1/scan` is **not rate-limited by default**
+so local and development use works without configuration. For public deployments
+set `-scan-rate` and `-scan-burst` to protect the shared Horizon and
+StellarExpert upstreams from being hammered under Assay's User-Agent:
+
+```
+-scan-burst N  initial burst of N scan requests allowed per client address
+               (default: 0, off)
+-scan-rate F   token-bucket refill rate in requests/second per client address
+               (requires -scan-burst; default: 0, off)
+```
+
+A refused scan returns `429 Too Many Requests` with a `Retry-After` header
+giving the number of seconds to wait.
 
 ## assay version
 
