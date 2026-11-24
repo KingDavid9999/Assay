@@ -2912,8 +2912,9 @@ fn quorum_and_is_safe_quorum_agree_on_responders_property() {
                 unique.push(*i);
             }
         }
-        let in_bounds =
-            threshold != 0 && threshold as usize <= unique.len() && unique.len() <= MAX_ATTESTORS as usize;
+        let in_bounds = threshold != 0
+            && threshold as usize <= unique.len()
+            && unique.len() <= MAX_ATTESTORS as usize;
         let responders: std::vec::Vec<&Safety> = unique
             .iter()
             .filter_map(|i| stored[*i].as_ref())
@@ -2950,7 +2951,10 @@ fn quorum_and_is_safe_quorum_agree_on_responders_property() {
                 assert!(count < threshold, "Unavailable with a quorum; {ctx}");
             }
             Quorum::Contested(n) => {
-                assert!(in_bounds && count >= threshold, "Contested without quorum; {ctx}");
+                assert!(
+                    in_bounds && count >= threshold,
+                    "Contested without quorum; {ctx}"
+                );
                 assert_eq!(*n, count, "quorum Contested count; {ctx}");
             }
             Quorum::Met(s) => {
@@ -2974,12 +2978,16 @@ fn quorum_and_is_safe_quorum_agree_on_responders_property() {
 
         // is_safe_quorum is true only when quorum is Met or Contested and the
         // conservative aggregate is inside the ceiling.
-        let inside_ceiling =
-            agg_severity <= ceiling && !(agg_flags & CONFISCATION_MASK != 0 && ceiling < SEVERITY_HIGH);
+        let inside_ceiling = agg_severity <= ceiling
+            && !(agg_flags & CONFISCATION_MASK != 0 && ceiling < SEVERITY_HIGH);
         if safe {
             assert!(has_quorum, "safe without Met/Contested; {ctx}");
             assert!(inside_ceiling, "safe outside the ceiling; {ctx}");
         }
-        assert_eq!(safe, has_quorum && inside_ceiling, "is_safe_quorum vs model; {ctx}");
+        assert_eq!(
+            safe,
+            has_quorum && inside_ceiling,
+            "is_safe_quorum vs model; {ctx}"
+        );
     }
 }
